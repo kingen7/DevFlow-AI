@@ -209,6 +209,26 @@ def _join_items(items: list[str], empty_text: str) -> str:
     return "; ".join(items) if items else empty_text
 
 
+def _asks_approved_knowledge(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        token in lowered
+        for token in [
+            "代码规范",
+            "编码规范",
+            "命名规范",
+            "命名约定",
+            "团队约定",
+            "项目记忆",
+            "保存的记忆",
+            "coding convention",
+            "code style",
+            "style guide",
+            "naming convention",
+        ]
+    )
+
+
 def _source_type_from_message(message: str) -> str | None:
     lowered = message.lower()
     if "issue" in lowered:
@@ -220,6 +240,13 @@ def _source_type_from_message(message: str) -> str | None:
     if any(token in lowered for token in ["knowledge", "知识库", "上传资料", "上传文档"]):
         return "knowledge_file"
     return None
+
+
+def _source_types_from_message(message: str) -> list[str] | None:
+    if _asks_approved_knowledge(message):
+        return ["memory_note", "knowledge_file", "project_doc"]
+    source_type = _source_type_from_message(message)
+    return [source_type] if source_type else None
 
 
 def _risky_action(message: str) -> str | None:
@@ -347,11 +374,16 @@ def _semantic_search(repo: Repository, message: str, context: dict[str, Any], db
         "start_date": context.get("start_date"),
         "end_date": context.get("end_date"),
     }
+    source_types = context.get("source_types") or _source_types_from_message(message)
+    source_type = context.get("source_type")
+    if not source_type and not source_types:
+        source_type = _source_type_from_message(message)
     results = search_similar_documents(
         db,
         repo.id,
         message,
-        source_type=context.get("source_type") or _source_type_from_message(message),
+        source_type=source_type,
+        source_types=source_types if isinstance(source_types, list) else None,
         limit=int(context.get("limit", 5)),
         metadata_filters={key: value for key, value in filters.items() if value},
     )
@@ -1048,7 +1080,14 @@ def _build_conversation_tools(repo: Repository | None, conversation: Conversatio
         query = str(input_data.get("query") or original_message).strip()
         if not query:
             raise ValueError("query 为必填项")
-        answer, citations, results = _semantic_search(repo, query, context, db)
+        search_context = dict(context or {})
+        if input_data.get("source_type"):
+            search_context["source_type"] = input_data["source_type"]
+        if input_data.get("source_types"):
+            search_context["source_types"] = input_data["source_types"]
+        if input_data.get("limit") is not None:
+            search_context["limit"] = input_data["limit"]
+        answer, citations, results = _semantic_search(repo, query, search_context, db)
         record_recall_event(
             db,
             repo_id=repo.id,

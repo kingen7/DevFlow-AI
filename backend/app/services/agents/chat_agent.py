@@ -307,6 +307,33 @@ class ChatAgent(BaseAgent):
             )
             return
 
+        if self._asks_approved_knowledge(message):
+            async for event in self._prefetch_approved_knowledge(state):
+                yield event
+            state["final_answer"] = await self._final_from_observations(state)
+            answer = str(state.get("final_answer") or "").strip()
+            if not answer:
+                answer = await self._fallback_answer(state)
+            self._stop_loop(state, "approved_knowledge_loaded", self._tool_completion_status(state))
+            self._record_skill_validation(state)
+            async for chunk in self._stream_answer(answer):
+                yield chunk
+            yield self._event(
+                "final",
+                {
+                    "run_id": "",
+                    "route": state.get("route") or "semantic_search",
+                    "tool_calls": state.get("tool_calls") or [],
+                    "agent_events": state.get("agent_events") or [],
+                    "answer": answer,
+                    "citations": state.get("citations") or [],
+                    "completion": self._completion_summary(state),
+                    **self._runtime_metadata(state),
+                    **self._evaluation_result(state),
+                },
+            )
+            return
+
         if self._asks_project_overview(message):
             async for event in self._prefetch_project_context(state):
                 yield event
@@ -992,8 +1019,11 @@ class ChatAgent(BaseAgent):
             "devflow_search_evidence。\n\n"
             "硬性规则：如果用户询问这个项目/仓库做什么、技术栈、架构、启动方式、依赖或源码行为，"
             "回答前必须检查工作区文件。优先读取 README、package 或 manifest 文件；如果工作区文件不可用，要明确说明。\n\n"
-            "涉及源码的问题，优先使用 workspace.search_code、workspace.read_file 或 workspace.list_files。"
-            "涉及已索引的仓库历史和上传知识，使用 rag.search_similar_documents 或 devflow_search_evidence。\n\n"
+            "记忆硬性规则：如果用户询问代码规范、命名约定、团队约定或已保存的项目记忆，"
+            "必须先用 rag.search_similar_documents 检索已批准的 memory_note 和知识库文件。"
+            "工作区源码只能作为补充，不能覆盖已保存记忆。找到记忆后直接引用其内容作答。\n\n"
+            "涉及源码实现的问题，优先使用 workspace.search_code、workspace.read_file 或 workspace.list_files。"
+            "涉及已索引的仓库历史、上传知识和已批准记忆，使用 rag.search_similar_documents 或 devflow_search_evidence。\n\n"
             "混合 RAG 约定：服务端上下文中的 [Related Evidence] 是根据原始问题完成的调用前检索。"
             "如果这些证据不足、互相冲突，或问题包含多个子问题，请改写为更具体的 query 调用 "
             "rag.search_similar_documents；可以用不同 query 连续补查，并在最终回答前比较多次 tool_result。\n\n"
@@ -1080,6 +1110,25 @@ class ChatAgent(BaseAgent):
                 "\u505a\u4ec0\u4e48",
                 "\u67b6\u6784",
                 "\u6280\u672f\u6808",
+            ]
+        )
+
+    def _asks_approved_knowledge(self, message: str) -> bool:
+        lowered = message.lower()
+        return any(
+            token in lowered
+            for token in [
+                "代码规范",
+                "编码规范",
+                "命名规范",
+                "命名约定",
+                "团队约定",
+                "项目记忆",
+                "保存的记忆",
+                "coding convention",
+                "code style",
+                "style guide",
+                "naming convention",
             ]
         )
 
@@ -1277,6 +1326,23 @@ class ChatAgent(BaseAgent):
                 async for event in call("workspace.read_file", {"path": path, "line_count": 220}):
                     yield event
 
+    async def _prefetch_approved_knowledge(self, state: ConversationState) -> AsyncIterator[dict[str, Any]]:
+        tools = state.get("tools") or {}
+        tool_names = state.get("tool_name_map") or {}
+        safe_name = next((safe for safe, public in tool_names.items() if public == "rag.search_similar_documents"), None)
+        if not safe_name or safe_name not in tools:
+            return
+        message = str(state.get("message") or "")
+        async for event in self._execute_tool_call_events(
+            {
+                "name": safe_name,
+                "args": {"query": message, "limit": 8},
+                "id": f"prefetch_rag_knowledge_{len(state.get('agent_events') or [])}",
+            },
+            state,
+        ):
+            yield event
+
     def _build_langchain_tools(self, raw_tools: dict[str, ConversationTool], context: dict[str, Any]) -> dict[str, StructuredTool]:
         wrapped: dict[str, StructuredTool] = {}
         for name, func in raw_tools.items():
@@ -1313,7 +1379,7 @@ class ChatAgent(BaseAgent):
             "workspace.read_file": "从所选仓库 checkout 中读取文本文件，可指定 start_line 和 line_count。只读。",
             "workspace.search_code": "在所选仓库 checkout 中搜索代码或文档文本。只读。",
             "repo_health.generate_summary": "总结当前仓库健康状态。",
-            "rag.search_similar_documents": "搜索项目历史与非结构化知识，包括 Issue 描述、PR 说明与 Review 讨论、失败 CI 日志、项目文档、上传知识和已批准的长期记忆。可传入改写后的 query，并用不同 query 连续调用以补查和交叉验证。源码优先使用 workspace 工具，团队成员和实时状态使用对应结构化工具。",
+            "rag.search_similar_documents": "搜索已批准的长期记忆、上传知识、项目文档，以及 Issue/PR/CI 等非结构化历史。询问代码规范、命名约定或团队约定时必须先调用本工具。可改写 query 连续补查。源码实现才用 workspace 工具。",
             "issue_agent.analyze_issue": "分析最新同步的 Issue。",
             "pr_review_agent.analyze_pr": "分析最新同步的 PR。",
             "ci_debug_agent.analyze_workflow_run": "分析最新失败的 CI 运行。",

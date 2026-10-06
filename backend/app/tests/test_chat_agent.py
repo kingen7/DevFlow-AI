@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.api.routes.chat import _build_conversation_tools, _repo_checkout_path
+from app.api.routes.chat import _build_conversation_tools, _repo_checkout_path, _source_types_from_message
 from app.core.config import settings
 from app.services.agents.chat_agent import ChatAgent
 
@@ -483,6 +483,50 @@ async def test_project_overview_prefetches_readme_without_waiting_for_model_tool
 
 
 @pytest.mark.asyncio
+async def test_code_convention_question_prefetches_memory_instead_of_workspace_loop() -> None:
+    tool_invocations: list[tuple[str, dict[str, Any]]] = []
+
+    async def search_rag(input_data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        tool_invocations.append(("rag", input_data))
+        return {
+            "route": "semantic_search",
+            "tool_calls": [{"tool_name": "rag.search_similar_documents", "arguments": input_data, "status": "success"}],
+            "answer": "找到以下相关历史记录：\n- [1] memory_note 代码规范：变量名必须用驼峰命名",
+            "citations": [{"type": "memory_note", "id": "note-1", "title": "代码规范"}],
+        }
+
+    async def search_code(input_data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        tool_invocations.append(("workspace", input_data))
+        return {
+            "route": "workspace_search_code",
+            "tool_calls": [{"tool_name": "workspace.search_code", "arguments": input_data, "status": "success"}],
+            "answer": "没有找到匹配的工作区代码。",
+            "citations": [],
+        }
+
+    agent = ChatAgent(model=SummaryModel())  # type: ignore[arg-type]
+    events = [
+        event
+        async for event in agent.run_stream(
+            {"message": "项目的代码规范是怎样的?"},
+            {
+                "tools": {
+                    "rag.search_similar_documents": search_rag,
+                    "workspace.search_code": search_code,
+                }
+            },
+        )
+    ]
+
+    final = [event for event in events if event["event"] == "final"][-1]["data"]
+    assert [name for name, _input_data in tool_invocations] == ["rag"]
+    assert tool_invocations[0][1]["query"] == "项目的代码规范是怎样的?"
+    assert final["route"] == "semantic_search"
+    assert final["completion"]["reason"] == "approved_knowledge_loaded"
+    assert final["answer"]
+
+
+@pytest.mark.asyncio
 async def test_chat_agent_combines_prefetched_evidence_with_rewritten_rag_searches() -> None:
     model = RewrittenRagModel()
     queries: list[str] = []
@@ -710,6 +754,17 @@ async def test_conversation_rag_tool_prefers_agent_rewritten_query(monkeypatch) 
     assert captured["recall_query"] == "refresh token idempotency race condition"
     assert captured["metadata"]["query_rewritten"] is True
     assert result["tool_calls"][0]["arguments"]["query"] == "refresh token idempotency race condition"
+
+
+def test_convention_questions_search_memory_notes() -> None:
+    assert _source_types_from_message("项目的代码规范是怎样的?") == [
+        "memory_note",
+        "knowledge_file",
+        "project_doc",
+    ]
+    agent = ChatAgent(model=SummaryModel())  # type: ignore[arg-type]
+    assert agent._asks_approved_knowledge("项目的代码规范是怎样的?")
+    assert not agent._asks_project_overview("项目的代码规范是怎样的?")
 
 
 def test_repo_checkout_path_reuses_existing_same_full_name_checkout(tmp_path, monkeypatch) -> None:
