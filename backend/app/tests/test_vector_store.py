@@ -62,6 +62,67 @@ def test_embedding_provider_failure_is_not_replaced_with_hash_vectors(monkeypatc
         )
 
 
+def test_volcengine_provider_posts_multimodal_text_and_flattens_nested_vector(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "embedding_provider", "volcengine")
+    monkeypatch.setattr(settings, "embedding_model", "Doubao-embedding-vision")
+    monkeypatch.setattr(settings, "embedding_dimensions", 4)
+    monkeypatch.setattr(settings, "embedding_api_key", "ark-test-key")
+    monkeypatch.setattr(settings, "embedding_base_url", "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"embedding": [[0.25, 0.25, 0.25, 0.25]]}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> bool:
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.rag.embeddings.httpx.Client", FakeClient)
+
+    vectors = embed_knowledge_texts(
+        ["项目记忆"],
+        provider="volcengine",
+        model="Doubao-embedding-vision",
+        dimensions=4,
+    )
+
+    assert captured["url"] == "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal"
+    assert captured["json"]["input"] == [{"type": "text", "text": "项目记忆"}]
+    assert vectors == [[0.25, 0.25, 0.25, 0.25]]
+
+
+def test_unsupported_provider_does_not_fall_back_to_local_huggingface(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "embedding_provider", "volcengine")
+    monkeypatch.setattr(settings, "embedding_model", "Doubao-embedding-vision")
+    monkeypatch.setattr(settings, "embedding_dimensions", 4)
+    monkeypatch.setattr(settings, "embedding_api_key", "ark-test-key")
+    monkeypatch.setattr(settings, "embedding_base_url", "https://ark.cn-beijing.volces.com/api/v3")
+
+    with pytest.raises(ValueError, match="Unsupported embedding provider"):
+        embed_knowledge_texts(
+            ["项目记忆"],
+            provider="not-a-provider",
+            model="Doubao-embedding-vision",
+            dimensions=4,
+        )
+
+
 def test_milvus_upsert_rejects_dimension_fitting_before_connecting(monkeypatch) -> None:
     monkeypatch.setattr(settings, "embedding_dimensions", 4)
     document = Document(

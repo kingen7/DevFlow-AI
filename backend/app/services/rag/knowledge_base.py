@@ -78,6 +78,8 @@ def model_catalog() -> dict[str, Any]:
         embedding_available = bool(settings.dashscope_api_key)
     elif provider == "openai_compatible":
         embedding_available = bool(settings.embedding_api_key or settings.llm_api_key)
+    elif provider == "volcengine":
+        embedding_available = bool(settings.embedding_api_key and settings.embedding_base_url)
     else:
         embedding_available = provider == "deterministic"
     return {

@@ -243,15 +243,18 @@ async def create_memory_note(
     if not content and not title:
         raise HTTPException(status_code=400, detail="记忆标题或内容至少需要填写一项")
     source_id = uuid.uuid4()
-    doc = add_document(
-        db,
-        repo_id,
-        "memory_note",
-        source_id,
-        title,
-        content or title,
-        {"display_title": title, "created_by": "user"},
-    )
+    try:
+        doc = add_document(
+            db,
+            repo_id,
+            "memory_note",
+            source_id,
+            title,
+            content or title,
+            {"display_title": title, "created_by": "user"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"保存记忆失败：{exc}") from exc
     rebuild_knowledge_graph(db, _repo_or_404(db, repo_id))
     return _group_documents([doc])[0]
 
