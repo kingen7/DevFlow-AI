@@ -38,9 +38,22 @@ def _validate_vector_dimensions(vector: list[float], dimensions: int, provider: 
     return vector
 
 
+def infer_api_embedding_provider() -> str | None:
+    api_key = (settings.embedding_api_key or "").strip()
+    base_url = (settings.embedding_base_url or "").strip().lower()
+    if api_key and base_url:
+        if any(token in base_url for token in ("volces", "volcengine", "multimodal", "ark.")):
+            return "volcengine"
+        return "openai_compatible"
+    if (settings.dashscope_api_key or "").strip():
+        return "dashscope"
+    return None
+
+
 def normalize_embedding_provider(provider: str) -> str:
     provider = (provider or "").strip().lower().replace("-", "_")
     aliases = {
+        "auto": "auto",
         "api": "openai_compatible",
         "openai": "openai_compatible",
         "remote": "openai_compatible",
@@ -60,6 +73,11 @@ def normalize_embedding_provider(provider: str) -> str:
     resolved = aliases.get(provider)
     if resolved is None:
         raise ValueError(f"Unsupported embedding provider: {provider or '<empty>'}")
+    inferred = infer_api_embedding_provider()
+    if resolved in {"auto", "local", "qwen_local"} and inferred:
+        return inferred
+    if resolved == "auto":
+        return "qwen_local"
     return resolved
 
 
@@ -142,11 +160,29 @@ def _flatten_embedding(raw: Any) -> list[float]:
     return [float(value) for value in raw]
 
 
+def _volcengine_embedding_vector(payload: dict[str, Any]) -> list[float]:
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return _flatten_embedding(data.get("embedding"))
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict):
+            return _flatten_embedding(first.get("embedding"))
+    raise ValueError("Volcengine embedding response did not include data")
+
+
 def _volcengine_embedding_url(base_url: str) -> str:
-    url = base_url.rstrip("/")
+    url = base_url.strip().rstrip("/")
     if url.endswith("/embeddings/multimodal") or url.endswith("/embeddings"):
         return url
     return f"{url}/embeddings/multimodal"
+
+
+def _http_error_detail(exc: httpx.HTTPStatusError) -> str:
+    body = (exc.response.text or "").strip()
+    if body:
+        return f"{exc.response.status_code} {body[:500]}"
+    return str(exc)
 
 
 def _embed_volcengine(
@@ -157,9 +193,9 @@ def _embed_volcengine(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> list[list[float]]:
-    api_key = api_key or settings.embedding_api_key
-    raw_base = base_url or settings.embedding_base_url
-    model = model or settings.embedding_model
+    api_key = (api_key or settings.embedding_api_key or "").strip()
+    raw_base = (base_url or settings.embedding_base_url or "").strip()
+    model = (model or settings.embedding_model or "").strip()
     if not api_key:
         raise RuntimeError("Volcengine embedding API key is not configured")
     if not raw_base:
@@ -178,12 +214,12 @@ def _embed_volcengine(
                     "input": [{"type": "text", "text": text}],
                 },
             )
-            response.raise_for_status()
-            rows = response.json().get("data") or []
-            if not rows:
-                raise ValueError("Volcengine embedding response did not include data")
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(f"Volcengine embedding failed: {_http_error_detail(exc)}") from exc
             output.append(
-                _validate_vector_dimensions(_flatten_embedding(rows[0].get("embedding")), dimensions, "volcengine")
+                _validate_vector_dimensions(_volcengine_embedding_vector(response.json()), dimensions, "volcengine")
             )
     return output
 
@@ -255,9 +291,6 @@ def embed_knowledge_texts(
         return []
     validate_embedding_contract(provider, model, dimensions)
     resolved = normalize_embedding_provider(provider)
-    if resolved in {"qwen_local", "local"}:
-        local_model = model if "/" in model else (settings.local_embedding_model or model)
-        return _embed_local(clean_texts, dimensions, model_name=local_model, is_query=is_query)
     if resolved == "volcengine":
         return _embed_volcengine(clean_texts, dimensions, model=model)
     if resolved == "dashscope":
@@ -270,6 +303,9 @@ def embed_knowledge_texts(
         )
     if resolved == "openai_compatible":
         return _embed_openai_compatible(clean_texts, dimensions, model=model)
+    if resolved in {"qwen_local", "local"}:
+        local_model = settings.local_embedding_model or settings.qwen_embedding_model or model
+        return _embed_local(clean_texts, dimensions, model_name=local_model, is_query=is_query)
     if resolved == "deterministic":
         return [deterministic_embedding(text, dimensions) for text in clean_texts]
     raise ValueError(f"Unsupported embedding provider: {resolved}")

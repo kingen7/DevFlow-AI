@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com"
     llm_model: str = "deepseek-v4-pro"
     rag_llm_enabled: bool = True
-    embedding_provider: str = "qwen_local"
+    embedding_provider: str = "auto"
     embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     embedding_dimensions: int = 1024
     embedding_api_key: str | None = None

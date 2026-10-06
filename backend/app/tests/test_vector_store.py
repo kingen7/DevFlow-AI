@@ -4,7 +4,7 @@ import pytest
 
 from app.core.config import settings
 from app.db.models import Document
-from app.services.rag.embeddings import embed_knowledge_texts, validate_embedding_contract
+from app.services.rag.embeddings import embed_knowledge_texts, normalize_embedding_provider, validate_embedding_contract
 from app.services.rag.vector_store import _clip_utf8, _collection_dimensions, upsert_milvus_documents
 
 
@@ -67,7 +67,7 @@ def test_volcengine_provider_posts_multimodal_text_and_flattens_nested_vector(mo
     monkeypatch.setattr(settings, "embedding_model", "Doubao-embedding-vision")
     monkeypatch.setattr(settings, "embedding_dimensions", 4)
     monkeypatch.setattr(settings, "embedding_api_key", "ark-test-key")
-    monkeypatch.setattr(settings, "embedding_base_url", "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal")
+    monkeypatch.setattr(settings, "embedding_base_url", "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal ")
     captured: dict[str, object] = {}
 
     class FakeResponse:
@@ -75,7 +75,7 @@ def test_volcengine_provider_posts_multimodal_text_and_flattens_nested_vector(mo
             return None
 
         def json(self) -> dict[str, object]:
-            return {"data": [{"embedding": [[0.25, 0.25, 0.25, 0.25]]}]}
+            return {"data": {"embedding": [0.25, 0.25, 0.25, 0.25]}}
 
     class FakeClient:
         def __init__(self, *args, **kwargs) -> None:
@@ -105,6 +105,32 @@ def test_volcengine_provider_posts_multimodal_text_and_flattens_nested_vector(mo
     assert captured["url"] == "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal"
     assert captured["json"]["input"] == [{"type": "text", "text": "项目记忆"}]
     assert vectors == [[0.25, 0.25, 0.25, 0.25]]
+
+
+def test_configured_embedding_api_is_preferred_over_local_provider(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "embedding_provider", "qwen_local")
+    monkeypatch.setattr(settings, "embedding_model", "Doubao-embedding-vision")
+    monkeypatch.setattr(settings, "embedding_dimensions", 4)
+    monkeypatch.setattr(settings, "embedding_api_key", "ark-test-key")
+    monkeypatch.setattr(settings, "embedding_base_url", "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal")
+    monkeypatch.setattr(
+        "app.services.rag.embeddings._embed_local",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("local embedding should not run")),
+    )
+    monkeypatch.setattr(
+        "app.services.rag.embeddings._embed_volcengine",
+        lambda texts, dimensions, **_kwargs: [[0.5] * dimensions for _ in texts],
+    )
+
+    assert normalize_embedding_provider("qwen_local") == "volcengine"
+    assert normalize_embedding_provider("auto") == "volcengine"
+    vectors = embed_knowledge_texts(
+        ["项目记忆"],
+        provider="qwen_local",
+        model="Doubao-embedding-vision",
+        dimensions=4,
+    )
+    assert vectors == [[0.5, 0.5, 0.5, 0.5]]
 
 
 def test_unsupported_provider_does_not_fall_back_to_local_huggingface(monkeypatch) -> None:

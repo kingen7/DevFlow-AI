@@ -29,8 +29,8 @@ def as_uuid(value: str | uuid.UUID) -> uuid.UUID:
 def get_or_create_config(db: Session, repo_id: str | uuid.UUID, *, commit: bool = True) -> KnowledgeBaseConfig:
     repo_uuid = as_uuid(repo_id)
     config = db.query(KnowledgeBaseConfig).filter(KnowledgeBaseConfig.repo_id == repo_uuid).one_or_none()
+    contract = embedding_contract()
     if config is None:
-        contract = embedding_contract()
         config = KnowledgeBaseConfig(
             repo_id=repo_uuid,
             embedding_provider=contract["provider"],
@@ -42,6 +42,10 @@ def get_or_create_config(db: Session, repo_id: str | uuid.UUID, *, commit: bool 
         if commit:
             db.commit()
             db.refresh(config)
+    else:
+        config.embedding_provider = contract["provider"]
+        config.embedding_model = contract["model"]
+        config.embedding_dimensions = contract["dimensions"]
     validate_embedding_contract(
         config.embedding_provider,
         config.embedding_model,
